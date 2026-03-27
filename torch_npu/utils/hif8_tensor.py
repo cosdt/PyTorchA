@@ -11,9 +11,11 @@ __all__ = []
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_map,tree_map_only
 import torch_npu
 from torch_npu.utils._error_code import ErrCode, pta_error
+from torch._subclasses.fake_tensor import FakeTensor
+from torch.utils._pytree import tree_flatten
 
 
 # init transformer engine
@@ -28,9 +30,38 @@ NPU_CUSTOM_DType = {
     torch.float32: tex.DType.float32,
     torch.half: tex.DType.float16,
     torch.bfloat16: tex.DType.bfloat16,
+    torch.int8: tex.DType.int8,
 }
 
+def _is_fakeish_tensor(x):
+    return (
+        isinstance(x, torch.Tensor)
+        and (
+            isinstance(x, FakeTensor)
+            or x.device.type == "meta"
+            or type(x).__name__ == "FunctionalTensor"
+        )
+    )
 
+def _hif8_needs_fake_path(x):
+    if not isinstance(x, _HiFloat8Tensor):
+        return False
+
+    d = getattr(x, "_data", None)
+
+    if _is_fakeish_tensor(x):
+        return True
+    if _is_fakeish_tensor(d):
+        return True
+
+    if d is not None:
+        dn = type(d).__name__
+        if "FunctionalTensor" in dn or "FakeTensor" in dn:
+            return True
+
+    return False
+
+@torch.compiler.allow_in_graph
 class _FromHiFloat8Func(torch.autograd.Function):
     """Cast from HIF8 to other dtype"""
 
@@ -42,10 +73,16 @@ class _FromHiFloat8Func(torch.autograd.Function):
     ) -> torch.Tensor:
         if dtype is None:
             dtype = tensor.dtype
+        
+        data = tensor._data
+
+        if data.device.type == "meta" or isinstance(data, FakeTensor):
+            return data.new_empty(tensor.size(), dtype=dtype)
+
         data = tensor._data.contiguous().view(1, -1).detach()
         out = tex.cast_from_fp8(
             data,
-            tex.DType.hifloat8,
+            NPU_CUSTOM_DType[dtype], # tex.DType.hifloat8,
             NPU_CUSTOM_DType[dtype],
         )
         out = out.view(tensor.size())
@@ -59,7 +96,7 @@ class _FromHiFloat8Func(torch.autograd.Function):
         # Assume that we want gradients in full precision
         return grad, None
 
-
+@torch.compiler.allow_in_graph
 class _ToHiFloat8Func(torch.autograd.Function):
     """Cast to HIF8 from other dtype"""
 
@@ -68,16 +105,20 @@ class _ToHiFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: torch.Tensor,
     ) -> _HiFloat8Tensor:
+        data = tensor
+        if data.device.type == "meta" or isinstance(data, FakeTensor):
+            return data.new_empty(tensor.size(), dtype=tensor.dtype)
 
         # Check input tensor TODO
         tensor = tensor.contiguous().npu().detach()
-        if tensor.dtype not in (torch.float32, torch.bfloat16, torch.float16):
-            tensor = tensor.float()
+        # if tensor.dtype not in (torch.float32, torch.bfloat16, torch.float16):
+        #     tensor = tensor.float()
+
 
         # Cast data to HIF8
         data = tex.cast_to_fp8(
             tensor.view(1, -1),
-            tex.DType.hifloat8,
+            NPU_CUSTOM_DType[tensor.dtype], # tex.DType.hifloat8,
         )
         data = data.view(tensor.size())
 
@@ -268,18 +309,18 @@ class _HiFloat8Tensor(torch.Tensor):
         dtype: torch.dtype = torch.float32,
     ):
         # Check that data buffer is valid
-        if data.element_size() != 1:
-            raise ValueError(
-                f"HiFloat8Tensor requires data buffer with 8-bit dtype (got dtype={data.dtype})"
-                + pta_error(ErrCode.VALUE)
-            )
+        # if data.element_size() != 1:
+        #     raise ValueError(
+        #         f"HiFloat8Tensor requires data buffer with 8-bit dtype (got dtype={data.dtype})"
+        #         + pta_error(ErrCode.VALUE)
+        #     )
         if data.requires_grad:
             raise ValueError(
                 "HiFloat8Tensor requires non-differentiable data buffer"
                 + pta_error(ErrCode.VALUE)
             )
-        if not data.is_npu:
-            data = data.npu()
+        # if not data.is_npu:
+        #     data = data.npu()
 
         # Initialize tensor object
         self = torch.Tensor._make_wrapper_subclass(
@@ -317,11 +358,17 @@ class _HiFloat8Tensor(torch.Tensor):
                 kwargs[key] = val
         return _HiFloat8Tensor(data=data, **kwargs)
 
+    # def __repr__(self):
+    #     return (
+    #         "HiFloat8Tensor("
+    #         f"data={self.from_hifloat8(dtype=self.dtype)}"
+    #         ")"
+    #     )
     def __repr__(self):
         return (
-            "HiFloat8Tensor("
-            f"data={self.from_hifloat8(dtype=self.dtype)}"
-            ")"
+            f"HiFloat8Tensor(shape={tuple(self.shape)}, "
+            f"dtype={self.dtype}, device={self.device}, "
+            f"data_dtype={self._data.dtype})"
         )
 
     def from_hifloat8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -336,7 +383,7 @@ class _HiFloat8Tensor(torch.Tensor):
     @classmethod
     def to_hifloat8(
         cls,
-        tensor: torch.Tensor
+        tensor: torch.Tensor,
     ):
         """Construct _HiFloat8Tensor from PyTorch tensor"""
         return _ToHiFloat8Func.apply(
@@ -394,7 +441,41 @@ class _HiFloat8Tensor(torch.Tensor):
         )
 
     @classmethod
+    def _fake_dispatch(cls, func, types, args, kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        def unwrap_hif8_for_fake(x):
+            if isinstance(x, cls):
+                d = getattr(x, "_data", None)
+                if isinstance(d, FakeTensor):
+                    return d.new_empty(x.shape, dtype=x.dtype)
+                return torch.empty(x.shape, dtype=x.dtype, device=x.device)
+            return x
+
+        new_args = tree_map_only(torch.Tensor, unwrap_hif8_for_fake, args)
+        new_kwargs = tree_map_only(torch.Tensor, unwrap_hif8_for_fake, kwargs)
+
+        return func(*new_args, **new_kwargs)
+
+    @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
+
+        flat_args, _ = tree_flatten((args, kwargs))
+
+        has_fake = any(
+            isinstance(x, FakeTensor)
+            for x in flat_args
+            if isinstance(x, torch.Tensor)
+        )
+        has_meta = any(
+            isinstance(x, torch.Tensor) and x.device.type == "meta"
+            for x in flat_args
+        )
+        has_fake_hif8 = any(_hif8_needs_fake_path(x) for x in flat_args)
+
+        if has_fake or has_meta or has_fake_hif8:
+            return cls._fake_dispatch(func, types, args, kwargs)
 
         # In-place copy op
         if func == aten.copy_.default:
@@ -441,7 +522,7 @@ class _HiFloat8Tensor(torch.Tensor):
                 tex.cast_to_fp8_noalloc(
                     src.view(1, -1),
                     dst._data.view(1, -1),
-                    tex.DType.hifloat8,
+                    NPU_CUSTOM_DType[dst._data.dtype], #tex.DType.hifloat8,
                 )
             else:
                 # Invalid case
@@ -489,9 +570,14 @@ class _HiFloat8Tensor(torch.Tensor):
             )
 
         def maybe_unwrap(t):
-            if isinstance(t, _HiFloat8Tensor):
-                return t.from_hifloat8()
-            return t
+            if not isinstance(t, _HiFloat8Tensor):
+                return t
+
+            if _hif8_needs_fake_path(t):
+                return torch.empty(t.shape, dtype=t.dtype, device=t.device)
+
+            return t.from_hifloat8()
+
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
             """Update values of HIF8 tensors
@@ -574,11 +660,40 @@ class _HiFloat8Tensor(torch.Tensor):
     # Cast to HIF8 when setting _HiFloat8Tensor.data
     data = property(_get_data, _set_data)
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-        return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
+    # @classmethod
+    # def __torch_function__(cls, func, types, args=(), kwargs=None):
+    #     if kwargs is None:
+    #         kwargs = {}
+    #     return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
 
     def transpose(self, dim0, dim1):
         return _TransposeFunc.apply(self, dim0, dim1)
+
+    def __tensor_flatten__(self):
+        return ["_data"], {"dtype": self.dtype}
+    
+    @classmethod
+    def __tensor_unflatten__(cls, tensor_data_dict, meta, outer_size, outer_stride):
+        data = tensor_data_dict["_data"]
+
+        # Rebuild wrapper subclass with the requested outer metadata.
+        # Fake/meta conversion paths require unflatten result to match
+        # outer_size/outer_stride exactly.
+        if outer_size is not None and outer_stride is not None:
+            if tuple(data.size()) != tuple(outer_size) or tuple(data.stride()) != tuple(outer_stride):
+                data = data.as_strided(outer_size, outer_stride, data.storage_offset())
+
+        if isinstance(data, FakeTensor) or data.device.type == "meta":
+            shape = outer_size if outer_size is not None else data.shape
+            stride = outer_stride if outer_stride is not None else data.stride()
+            return torch.empty_strided(
+                shape,
+                stride,
+                dtype=meta["dtype"],
+                device=data.device,
+            )
+
+        return cls(
+            data=data,
+            dtype=meta["dtype"],
+        ) 
