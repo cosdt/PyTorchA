@@ -71,7 +71,7 @@ class _FromHiFloat8ConstrFunc(torch.autograd.Function):
 class HiFloat8TrainingTensor(torch.Tensor):
     _data: torch.Tensor
     _orig_dtype: torch.dtype
-    __slot__ = ["_data", "_orig_dtype"]
+    __slots__ = ["_data", "_orig_dtype"]
 
     def __new__(
         cls,
@@ -100,8 +100,8 @@ class HiFloat8TrainingTensor(torch.Tensor):
         return ["_data"], {"_orig_dtype": self._orig_dtype}
 
     @staticmethod
-    def __tensor_unflatten__(tensors: dict, metadata, outer_size, outer_stride):
-        return HiFloat8TrainingTensor(tensors["_data"], metadata["_orig_dtype"])
+    def __tensor_unflatten__(tensor_dict: dict, metadata, outer_size, outer_stride):
+        return HiFloat8TrainingTensor(tensor_dict["_data"], metadata["_orig_dtype"])
 
     def to_original_precision(self):
         return _FromHiFloat8ConstrFunc.apply(self)

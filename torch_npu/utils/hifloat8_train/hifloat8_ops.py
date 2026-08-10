@@ -83,7 +83,7 @@ def hifloat8_view(aten_op, args, kwargs=None):
 
 
 @implements([aten.split.Tensor])
-def float8_split(aten_op, args, kwargs=None):
+def hifloat8_split(aten_op, args, kwargs=None):
     new_data_tensors = aten_op(args[0]._data, *args[1:], **kwargs)
 
     def make_hifloat8(data):
@@ -139,6 +139,8 @@ def hifloat8_mm(aten_op, args, kwargs=None):
         torch.ones(1, dtype=torch.float32).to(a._data.device),
         output_dtype=torch.bfloat16,
         pertoken_scale=None,
+        x1_dtype=torch_npu.hifloat8,
+        x2_dtype=torch_npu.hifloat8,
     )
 
     return output
