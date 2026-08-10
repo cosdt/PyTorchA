@@ -1,0 +1,3 @@
+import torch
+from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import HiFloat8TrainingTensor,_ToHiFloat8ConstrFunc
+
