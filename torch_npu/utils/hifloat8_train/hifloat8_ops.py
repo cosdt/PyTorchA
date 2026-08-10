@@ -1,6 +1,8 @@
 import torch
 import torch_npu
 
+from typing import Any, Dict, Tuple
+
 from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import (
     HiFloat8TrainingTensor,
 )
@@ -8,7 +10,7 @@ from torch.utils._pytree import tree_map
 
 aten = torch.ops.aten
 
-HIFLOAT8_OPS_TABLE: dict[any, any] = {}
+HIFLOAT8_OPS_TABLE: Dict[Any, Any] = {}
 
 
 def implements(aten_ops):
@@ -98,7 +100,7 @@ def hifloat8_split(aten_op, args, kwargs=None):
 
 @implements([aten.cat.default])
 def hifloat8_cat(aten_op, args, kwargs=None):
-    chunked_tensors: tuple[HiFloat8TrainingTensor] = args[0]
+    chunked_tensors: Tuple[HiFloat8TrainingTensor, ...] = args[0]
 
     orig_dtype = chunked_tensors[0]._orig_dtype
 

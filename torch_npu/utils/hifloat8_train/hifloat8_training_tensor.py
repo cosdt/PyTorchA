@@ -1,7 +1,8 @@
 
-
 import torch
 import torch_npu
+
+from typing import Dict
 
 
 tex = torch_npu._C._cd
@@ -100,7 +101,7 @@ class HiFloat8TrainingTensor(torch.Tensor):
         return ["_data"], {"_orig_dtype": self._orig_dtype}
 
     @staticmethod
-    def __tensor_unflatten__(tensor_dict: dict, metadata, outer_size, outer_stride):
+    def __tensor_unflatten__(tensor_dict: Dict, metadata, outer_size, outer_stride):
         return HiFloat8TrainingTensor(tensor_dict["_data"], metadata["_orig_dtype"])
 
     def to_original_precision(self):

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from typing import Optional
+from typing import Callable, Optional
 
 from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import hp_tensor_to_hifloat8
 
@@ -53,9 +53,9 @@ class HiFloat8Linear(torch.nn.Linear):
 
 def swap_linear_layers(
     module: nn.Module,
-    from_float_func: callable[[nn.Linear], nn.Linear],
+    from_float_func: Callable[[nn.Linear], nn.Linear],
     *,
-    module_filter_fn: Optional[callable[[nn.Module, str], bool]] = None,
+    module_filter_fn: Optional[Callable[[nn.Module, str], bool]] = None,
 ) -> nn.Module:
     if isinstance(module, nn.Linear) and (
         module_filter_fn is None or module_filter_fn(module, "")
@@ -103,7 +103,7 @@ def swap_linear_layers(
 def convert_to_hifloat8_training(
     module: nn.Module,
     *,
-    module_filter_fn: Optional[callable[[nn.Module, str], bool]] = None,
+    module_filter_fn: Optional[Callable[[nn.Module, str], bool]] = None,
 ) -> nn.Module:
 
     torch._C._log_api_usage_once("...")
