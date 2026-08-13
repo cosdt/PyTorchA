@@ -138,7 +138,7 @@ def hifloat8_mm(aten_op, args, kwargs=None):
     output = torch_npu.npu_quant_matmul(
         a._data,
         b._data,
-        torch.ones(1, dtype=torch.float32).to(a._data.device),
+        torch.ones(1, dtype=torch.uint64).to(a._data.device),
         output_dtype=torch.bfloat16,
         pertoken_scale=None,
         x1_dtype=torch_npu.hifloat8,

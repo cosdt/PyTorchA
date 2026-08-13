@@ -2,9 +2,6 @@
 import torch
 import torch_npu
 
-from torch.distributed._tensor import DTensor
-from torch.library import custom_op
-
 from typing import Dict
 
 
@@ -19,34 +16,11 @@ NPU_CUSTOM_DType = {
     torch.bfloat16: tex.DType.bfloat16,
 }
 
-TEX_DTYPE_TO_TORCH = {v: k for k, v in NPU_CUSTOM_DType.items()}
-
-
-@custom_op("npu::_hif8_cast_to", mutates_args=())
-def _hif8_cast_to(x: torch.Tensor, otype: int) -> torch.Tensor:
-    """Cast to HiFloat8 (FP8). ``otype`` 是 c10_npu DType 的取值。"""
-    return tex.cast_to_fp8(x, otype)
-
-
-@_hif8_cast_to.register_fake
-def _hif8_cast_to_fake(x, otype):
-    return torch.empty(x.shape, dtype=torch.uint8, device=x.device)
-
-
-@custom_op("npu::_hif8_cast_from", mutates_args=())
-def _hif8_cast_from(x: torch.Tensor, itype: int, otype: int) -> torch.Tensor:
-    return tex.cast_from_fp8(x, itype, otype)
-
-
-@_hif8_cast_from.register_fake
-def _hif8_cast_from_fake(x, itype, otype):
-    dtype = TEX_DTYPE_TO_TORCH.get(otype, torch.float32)
-    return torch.empty(x.shape, dtype=dtype, device=x.device)
-
-@torch._dynamo.allow_in_graph
+# @torch._dynamo.allow_in_graph
 class _ToHiFloat8ConstrFunc(torch.autograd.Function):
 
     @staticmethod
+    @torch._dynamo.disable
     def forward(
         ctx,
         input: torch.Tensor,
@@ -56,7 +30,7 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
             input = input.float()
 
         # Cast data to HIF8
-        data = _hif8_cast_to(
+        data = tex.cast_to_fp8(
             input.view(1, -1),
             tex.DType.hifloat8,
         )
@@ -73,7 +47,7 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
         return grad_output
 
 
-@torch._dynamo.allow_in_graph
+# @torch._dynamo.allow_in_graph
 class _FromHiFloat8ConstrFunc(torch.autograd.Function):
 
     @staticmethod
@@ -82,7 +56,7 @@ class _FromHiFloat8ConstrFunc(torch.autograd.Function):
         input: torch.Tensor,
     ):
         data = input._data.contiguous().view(1, -1).detach()
-        out = _hif8_cast_from(
+        out = tex.cast_from_fp8(
             data,
             tex.DType.hifloat8,
             NPU_CUSTOM_DType[input._orig_dtype],

@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import hp_tensor_to_hifloat8
 
-@torch._dynamo.allow_in_graph
+# @torch._dynamo.allow_in_graph
 class matmul_with_hifloat8(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input: torch.Tensor, weight: torch.Tensor):
