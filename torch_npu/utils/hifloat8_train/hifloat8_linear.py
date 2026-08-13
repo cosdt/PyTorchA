@@ -23,9 +23,10 @@ class matmul_with_hifloat8(torch.autograd.Function):
 
         input_hif8 = hp_tensor_to_hifloat8(input)
         weight_hif8 = hp_tensor_to_hifloat8(weight)
+        grad_output_hif8 = hp_tensor_to_hifloat8(grad_output)
 
-        grad_input = torch.mm(grad_output, weight_hif8.t())
-        grad_weight = torch.mm(input_hif8.t(), grad_output)
+        grad_input = torch.mm(grad_output_hif8, weight_hif8.t())
+        grad_weight = torch.mm(input_hif8.t(), grad_output_hif8)
 
         return grad_input, grad_weight
 
