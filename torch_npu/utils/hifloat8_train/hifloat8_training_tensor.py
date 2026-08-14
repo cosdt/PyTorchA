@@ -2,6 +2,7 @@
 import torch
 import torch_npu
 
+from torch.distributed._tensor import DTensor
 from typing import Dict
 
 
@@ -25,6 +26,9 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
         ctx,
         input: torch.Tensor,
     ):
+        if isinstance(input, DTensor):
+            input = input.to_local()
+        
         input = input.contiguous().npu().detach()
         if input.dtype not in (torch.float32, torch.bfloat16, torch.float16):
             input = input.float()
