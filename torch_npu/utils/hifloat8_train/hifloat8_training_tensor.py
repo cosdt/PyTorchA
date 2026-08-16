@@ -84,7 +84,7 @@ class _FromHiFloat8ConstrFunc(torch.autograd.Function):
 
 class HiFloat8TrainingTensor(torch.Tensor):
     _data: torch.Tensor
-    _scale: torch.Tensor    # per-tensor
+    _scale: torch.Tensor    # per-token -> (M,)
     _orig_dtype: torch.dtype
     __slots__ = ["_data", "_scale", "_orig_dtype"]
 

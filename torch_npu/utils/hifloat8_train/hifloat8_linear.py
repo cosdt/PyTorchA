@@ -12,9 +12,10 @@ class matmul_with_hifloat8(torch.autograd.Function):
         ctx.save_for_backward(input, weight)
 
         input_hif8 = hp_tensor_to_hifloat8(input)
-        weight_hif8 = hp_tensor_to_hifloat8(weight)
+        # 对 weight 最后两维转置后 per-token 量化 == 对原 weight 沿 out 维 per-channel 量化
+        weight_hif8 = hp_tensor_to_hifloat8(weight.mT)
 
-        output = torch.mm(input_hif8, weight_hif8)
+        output = torch.mm(input_hif8, weight_hif8.mT)
         return output
 
     @staticmethod
@@ -22,11 +23,11 @@ class matmul_with_hifloat8(torch.autograd.Function):
         input, weight = ctx.saved_tensors
 
         input_hif8 = hp_tensor_to_hifloat8(input)
-        weight_hif8 = hp_tensor_to_hifloat8(weight)
+        weight_hif8 = hp_tensor_to_hifloat8(weight.mT)
         grad_output_hif8 = hp_tensor_to_hifloat8(grad_output)
 
-        grad_input = torch.mm(grad_output_hif8, weight_hif8.t())
-        grad_weight = torch.mm(input_hif8.t(), grad_output_hif8)
+        grad_input = torch.mm(grad_output_hif8, weight_hif8.mT)
+        grad_weight = torch.mm(input_hif8.mT, grad_output_hif8)
 
         return grad_input, grad_weight
 
