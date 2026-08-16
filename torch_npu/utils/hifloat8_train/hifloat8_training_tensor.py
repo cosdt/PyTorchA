@@ -33,16 +33,21 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
         if input.dtype not in (torch.float32, torch.bfloat16, torch.float16):
             input = input.float()
 
-        # Cast data to HIF8
-        data = tex.cast_to_fp8(
-            input.view(1, -1),
-            tex.DType.hifloat8,
+        M = input.numel() // input.size(-1)
+        input_2d = input.view(M, input.size(-1))
+
+        # Cast data to HIF8 via dynamic quant (real GE op, graph-mode friendly)
+        data, scale = torch_npu.npu_dynamic_quant(
+            input_2d,
+            dst_type=torch_npu.hifloat8,
+            dst_type_max=15,
         )
         data = data.view(input.size())
 
         # Construct HIF8 tensor
         return HiFloat8TrainingTensor(
             data=data,
+            scale=scale,
             orig_dtype=input.dtype,
         )
 
@@ -66,6 +71,9 @@ class _FromHiFloat8ConstrFunc(torch.autograd.Function):
             NPU_CUSTOM_DType[input._orig_dtype],
         )
         out = out.view(input.size())
+        # npu_dynamic_quant 是 scaled quant，反量化乘回 per-token scale（每行一个）
+        scale = input._scale.reshape(input.shape[:-1] + (1,))
+        out = out * scale.to(out.dtype)
         return out
 
 
@@ -76,12 +84,14 @@ class _FromHiFloat8ConstrFunc(torch.autograd.Function):
 
 class HiFloat8TrainingTensor(torch.Tensor):
     _data: torch.Tensor
+    _scale: torch.Tensor    # per-tensor
     _orig_dtype: torch.dtype
-    __slots__ = ["_data", "_orig_dtype"]
+    __slots__ = ["_data", "_scale", "_orig_dtype"]
 
     def __new__(
         cls,
         data: torch.Tensor,
+        scale: torch.Tensor,
         orig_dtype: torch.dtype,
     ):
         self = torch.Tensor._make_wrapper_subclass(
@@ -95,19 +105,27 @@ class HiFloat8TrainingTensor(torch.Tensor):
             device=data.device,
         )
         self._data = data
+        self._scale = scale
         self._orig_dtype = orig_dtype
 
         return self
 
     def __repr__(self):
-        return f"HiFloat8TrainingTensor({self._data}, orig_dtype={self._orig_dtype})"
+        return (
+            f"HiFloat8TrainingTensor({self._data}, scale={self._scale}, "
+            f"orig_dtype={self._orig_dtype})"
+        )
 
     def __tensor_flatten__(self):
-        return ["_data"], {"_orig_dtype": self._orig_dtype}
+        return ["_data", "_scale"], {"_orig_dtype": self._orig_dtype}
 
     @staticmethod
     def __tensor_unflatten__(tensor_dict: Dict, metadata, outer_size, outer_stride):
-        return HiFloat8TrainingTensor(tensor_dict["_data"], metadata["_orig_dtype"])
+        return HiFloat8TrainingTensor(
+            tensor_dict["_data"],
+            tensor_dict["_scale"],
+            metadata["_orig_dtype"],
+        )
 
     def to_original_precision(self):
         return _FromHiFloat8ConstrFunc.apply(self)

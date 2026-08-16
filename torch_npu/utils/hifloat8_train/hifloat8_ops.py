@@ -42,6 +42,7 @@ def hifloat8_desugar_op(aten_op, args, kwargs=None):
     new_data = aten_op(args[0]._data, *args[1:], **kwargs)
     return HiFloat8TrainingTensor(
         new_data,
+        args[0]._scale,
         args[0]._orig_dtype,
     )
 
@@ -55,6 +56,7 @@ def hifloat8_desugar_data_and_scale_op(aten_op, args, kwargs=None):
     new_data = aten_op(args[0]._data, *args[1:], **kwargs)
     return HiFloat8TrainingTensor(
         new_data,
+        args[0]._scale,
         args[0]._orig_dtype,
     )
 
@@ -70,6 +72,7 @@ def hifloat8_transpose(aten_op, args, kwargs=None):
 
     return HiFloat8TrainingTensor(
         new_data,
+        args[0]._scale,
         args[0]._orig_dtype,
     )
 
@@ -80,6 +83,7 @@ def hifloat8_view(aten_op, args, kwargs=None):
     new_data = aten_op(args[0]._data, *args[1:], **kwargs)
     return HiFloat8TrainingTensor(
         new_data,
+        args[0]._scale,
         args[0]._orig_dtype,
     )
 
@@ -91,6 +95,7 @@ def hifloat8_split(aten_op, args, kwargs=None):
     def make_hifloat8(data):
         return HiFloat8TrainingTensor(
             data,
+            args[0]._scale,
             args[0]._orig_dtype,
         )
 
@@ -110,7 +115,7 @@ def hifloat8_cat(aten_op, args, kwargs=None):
 
     new_data = aten_op(chunk_data, *args[1:], **kwargs)
     new_data = new_data.view(torch.uint8)
-    return HiFloat8TrainingTensor(new_data, orig_dtype)
+    return HiFloat8TrainingTensor(new_data, chunked_tensors[0]._scale, orig_dtype)
 
 
 @implements([aten.sum.dim_IntList])
@@ -138,9 +143,9 @@ def hifloat8_mm(aten_op, args, kwargs=None):
     output = torch_npu.npu_quant_matmul(
         a._data,
         b._data,
-        torch.ones(1, dtype=torch.uint64).to(a._data.device),
+        b._scale,
         output_dtype=torch.bfloat16,
-        pertoken_scale=None,
+        pertoken_scale=a._scale,
         x1_dtype=torch_npu.hifloat8,
         x2_dtype=torch_npu.hifloat8,
     )
