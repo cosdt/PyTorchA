@@ -17,33 +17,59 @@ NPU_CUSTOM_DType = {
     torch.bfloat16: tex.DType.bfloat16,
 }
 
+HIF8_MAX = {
+    "input": 15.0,
+    "weight": 15.0,
+    "grad": 224.0,
+}
+
+
+def compute_scale(t: torch.Tensor, kind: str) -> torch.Tensor:
+    max_val = HIF8_MAX[kind]
+    # amax = t.abs().amax().float().clamp_min(1e-12)
+    # scale = amax/max_val
+
+    if kind == "input":
+        # [M,K] -> [M]
+        amax = t.abs().amax(dim=-1)
+
+    elif kind == "weight":
+        # [N,K] -> [N]
+        amax = t.abs().amax(dim=-1)
+
+    elif kind == "grad":
+        # [M,K] -> [M]
+        amax = t.abs().amax(dim=-1)
+
+    scale = amax.float().clamp_min(1e-12) / max_val
+
+    return scale
+
+
 # @torch._dynamo.allow_in_graph
 class _ToHiFloat8ConstrFunc(torch.autograd.Function):
 
     @staticmethod
-    @torch._dynamo.disable
     def forward(
         ctx,
         input: torch.Tensor,
+        kind: str,
     ):
         if isinstance(input, DTensor):
             input = input.to_local()
         
-        input = input.contiguous().npu().detach()
         if input.dtype not in (torch.float32, torch.bfloat16, torch.float16):
             input = input.float()
 
-        M = input.numel() // input.size(-1)
-        input_2d = input.view(M, input.size(-1))
+        scale = compute_scale(input,kind)
 
-        # Cast data to HIF8 via dynamic quant (real GE op, graph-mode friendly)
-        data, scale = torch_npu.npu_dynamic_quant(
-            input_2d,
-            dst_type=torch_npu.hifloat8,
-            dst_type_max=15,
+
+        data, scale = torch_npu.npu_quantize(
+            input,
+            scale,
+            dtype=torch_npu.hifloat8,
         )
-        data = data.view(input.size())
-
+    
         # Construct HIF8 tensor
         return HiFloat8TrainingTensor(
             data=data,
@@ -153,5 +179,7 @@ class HiFloat8TrainingTensor(torch.Tensor):
     __torch_function__ = torch._C._disabled_torch_function_impl
 
 
-def hp_tensor_to_hifloat8(input: torch.Tensor) -> HiFloat8TrainingTensor:
-    return _ToHiFloat8ConstrFunc.apply(input)
+def hp_tensor_to_hifloat8(input: torch.Tensor, kind: str) -> HiFloat8TrainingTensor:
+    return _ToHiFloat8ConstrFunc.apply(input, kind)
+
+

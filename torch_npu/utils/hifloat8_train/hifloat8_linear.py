@@ -3,7 +3,9 @@ from torch import nn
 
 from typing import Callable, Optional
 
-from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import hp_tensor_to_hifloat8
+from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import (
+    hp_tensor_to_hifloat8,
+)
 
 @torch._dynamo.allow_in_graph
 class matmul_with_hifloat8(torch.autograd.Function):
@@ -11,23 +13,40 @@ class matmul_with_hifloat8(torch.autograd.Function):
     def forward(ctx, input: torch.Tensor, weight: torch.Tensor):
         ctx.save_for_backward(input, weight)
 
-        input_hif8 = hp_tensor_to_hifloat8(input)
-        # 对 weight 最后两维转置后 per-token 量化 == 对原 weight 沿 out 维 per-channel 量化
-        weight_hif8 = hp_tensor_to_hifloat8(weight.mT)
+        input_shape = input.shape
 
-        output = torch.mm(input_hif8, weight_hif8.mT)
+        input_2d = input.reshape(-1, input.shape[-1])
+
+        input_hif8 = hp_tensor_to_hifloat8(input_2d,"input")
+        weight_hif8 = hp_tensor_to_hifloat8(weight,"weight")
+
+        output = torch.mm(input_hif8, weight_hif8.t())
+
+        output = output.reshape(*input_shape[:-1], -1)
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         input, weight = ctx.saved_tensors
 
-        input_hif8 = hp_tensor_to_hifloat8(input)
-        weight_hif8 = hp_tensor_to_hifloat8(weight.mT)
-        grad_output_hif8 = hp_tensor_to_hifloat8(grad_output)
+        input_2d = input.reshape(-1, input.shape[-1])
+        grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
 
-        grad_input = torch.mm(grad_output_hif8, weight_hif8.mT)
-        grad_weight = torch.mm(input_hif8.mT, grad_output_hif8)
+        # weight 形状 [N, K]（N=输出通道，K=输入通道）
+        # grad_input = grad_output @ weight = [M, N] @ [N, K] = [M, K]
+        #   x2=weight 的最后一维是 K，scale 需按 K（列）量化
+        grad_output_hif8 = hp_tensor_to_hifloat8(grad_output_2d, "grad")
+        weight_col_hif8 = hp_tensor_to_hifloat8(weight.t(), "weight").t()
+        grad_input = torch.mm(grad_output_hif8, weight_col_hif8)
+
+        # grad_weight = grad_output^T @ input = [N, M] @ [M, K] = [N, K]
+        #   x1=grad_output^T 倒数第二维是 N，x2=input 最后一维是 K，均按列量化
+        grad_output_col_hif8 = hp_tensor_to_hifloat8(grad_output_2d.t(), "grad").t()
+        input_col_hif8 = hp_tensor_to_hifloat8(input_2d.t(), "input").t()
+        grad_weight = torch.mm(grad_output_col_hif8.t(), input_col_hif8)
+
+        grad_input = grad_input.reshape_as(input)
 
         return grad_input, grad_weight
 
@@ -38,7 +57,7 @@ class HiFloat8Linear(torch.nn.Linear):
         super().__init__(*args, **kwargs)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = matmul_with_hifloat8.apply(input, self.weight.t())
+        output = matmul_with_hifloat8.apply(input, self.weight)
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
         return output

@@ -140,12 +140,27 @@ def hifloat8_mm(aten_op, args, kwargs=None):
         b, HiFloat8TrainingTensor
     ), f"Expecting both HiFloat8TrainingTensor for mm inputs but found {type(a)} and {type(b)}"
 
+    # npu_quant_matmul 约束：
+    #   scale：1 维 (t,)，t == 1 或 n，n 为 x2 的最后一维
+    #   pertoken_scale：1 维 (m,)，m 为 x1 的倒数第二维
+    def normalize_scale(scale, expect, name):
+        scale = scale.reshape(-1)
+        if scale.numel() == 1:
+            return scale
+        assert scale.numel() == expect, (
+            f"{name} numel {scale.numel()} does not match expected {expect}"
+        )
+        return scale
+
+    scale = normalize_scale(b._scale, b.shape[-1], "scale")
+    pertoken_scale = normalize_scale(a._scale, a.shape[-2], "pertoken_scale")
+
     output = torch_npu.npu_quant_matmul(
         a._data,
         b._data,
-        b._scale,
+        scale,
         output_dtype=torch.bfloat16,
-        pertoken_scale=a._scale,
+        pertoken_scale=pertoken_scale,
         x1_dtype=torch_npu.hifloat8,
         x2_dtype=torch_npu.hifloat8,
     )
