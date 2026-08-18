@@ -61,15 +61,20 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
         if input.dtype not in (torch.float32, torch.bfloat16, torch.float16):
             input = input.float()
 
-        scale = compute_scale(input,kind)
+        scale = compute_scale(input, kind)
 
-
-        data, scale = torch_npu.npu_quantize(
-            input,
+        # npu_quantize 的 scale 只支持标量或按最后一维缩放，而 compute_scale
+        # 是沿最后一维求 amax（per-token / per-channel）。因此先交换最后两维，
+        # 让目标维度落到最后一维，量化完成后再交换回来。
+        input_t = input.transpose(-1, -2)
+        data = torch_npu.npu_quantize(
+            input_t,
             scale,
+            zero_points=None,
             dtype=torch_npu.hifloat8,
         )
-    
+        data = data.transpose(-1, -2)
+
         # Construct HIF8 tensor
         return HiFloat8TrainingTensor(
             data=data,
