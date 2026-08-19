@@ -43,6 +43,10 @@ def compute_scale(t: torch.Tensor, kind: str) -> torch.Tensor:
 
     scale = amax.float().clamp_min(1e-12) / max_val
 
+    ws = scale.data.reshape(-1).float()
+
+    i64_scale = torch_npu.npu_trans_quant_param(ws)
+
     return scale
 
 
