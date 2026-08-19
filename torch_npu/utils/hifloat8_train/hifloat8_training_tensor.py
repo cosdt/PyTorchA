@@ -43,11 +43,8 @@ def compute_scale(t: torch.Tensor, kind: str) -> torch.Tensor:
 
     scale = amax.float().clamp_min(1e-12) / max_val
 
-    ws = scale.data.reshape(-1).float()
 
-    i64_scale = torch_npu.npu_trans_quant_param(ws)
-
-    return i64_scale
+    return scale
 
 
 # @torch._dynamo.allow_in_graph
@@ -78,6 +75,11 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
             dtype=torch_npu.hifloat8,
         )
         data = data.transpose(-1, -2)
+
+        ws = scale.data.reshape(-1).float()
+
+        i64_scale = torch_npu.npu_trans_quant_param(ws)
+
 
         # Construct HIF8 tensor
         return HiFloat8TrainingTensor(
