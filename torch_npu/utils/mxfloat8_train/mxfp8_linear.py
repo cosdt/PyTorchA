@@ -30,7 +30,7 @@ def _quant_x2(t: torch.Tensor) -> MxFP8TrainingTensor:
         dst_type=torch.float8_e4m3fn,
         block_size=MXFP8_BLOCK_SIZE,
     )
-    return MxFP8TrainingTensor(data.t(), scale.t(), t.dtype)
+    return MxFP8TrainingTensor(data.t(), scale.transpose(0, 1), t.dtype)
 
 
 @torch._dynamo.allow_in_graph
@@ -45,9 +45,10 @@ class matmul_with_mxfp8(torch.autograd.Function):
         weight_mxfp8 = hp_tensor_to_mxfp8(weight)    # [N, K], scale=[N, ceilK]
 
         # 权重数据与 scale 都转置，匹配 npu_quant_matmul 的 x2 布局（[K, N]）
+        # scale 是三维（带打包维），用 transpose(0, 1) 交换前两维、保留打包维
         weight_t = MxFP8TrainingTensor(
-            weight_mxfp8._data.t(),    # [K, N]
-            weight_mxfp8._scale.t(),   # [ceilK, N]
+            weight_mxfp8._data.t(),                  # [K, N]
+            weight_mxfp8._scale.transpose(0, 1),     # [ceilK, N, 2]
             weight_mxfp8._orig_dtype,
         )
 

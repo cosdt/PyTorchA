@@ -63,9 +63,12 @@ class _FromMxFP8ConstrFunc(torch.autograd.Function):
         input: torch.Tensor,
     ):
         # 反量化：q * scale。scale 是 uint8 存的 E8M0 指数（偏置 127），
-        # 先转成 2^(e-127) 的乘性 scale，再沿最后一维每 MXFP8_BLOCK_SIZE 个元素广播。
+        # 可能是 [..., ceilK]（2D）或 [..., ceilK//2, 2]（3D 打包），先展开打包维，
+        # 再转成 2^(e-127) 的乘性 scale，沿最后一维每 MXFP8_BLOCK_SIZE 个元素广播。
         out = input._data.float()
         e = input._scale.float()
+        if e.dim() >= 3:
+            e = e.reshape(*e.shape[:-2], -1)
         scale = torch.where(e == 0, torch.zeros_like(e), torch.pow(2.0, e - 127.0))
         scale = scale.repeat_interleave(MXFP8_BLOCK_SIZE, dim=-1)
         scale = scale[..., : input._data.shape[-1]]
