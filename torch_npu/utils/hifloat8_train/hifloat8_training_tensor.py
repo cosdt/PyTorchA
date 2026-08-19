@@ -64,23 +64,22 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
 
         scale = compute_scale(input, kind)
 
+        ws = scale.reshape(-1).float()
+
         # per-tensor 量化，scale 为标量，无需转置
         data = torch_npu.npu_quantize(
             input,
-            scale,
+            ws,
             zero_points=None,
             dtype=torch_npu.hifloat8,
         )
-
-        ws = scale.reshape(-1).float()
-
-        i64_scale = torch_npu.npu_trans_quant_param(ws)
+        # i64_scale = torch_npu.npu_trans_quant_param(ws)
 
 
         # Construct HIF8 tensor
         return HiFloat8TrainingTensor(
             data=data,
-            scale=i64_scale,
+            scale=ws,
             orig_dtype=input.dtype,
         )
 
