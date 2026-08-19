@@ -118,17 +118,19 @@ def run_training(model_engine, input_ids, labels, steps, log_interval=10):
 
     loss_history = []
 
-    # 同步一下，保证计时从训练开始
-    if dist.get_rank() == 0:
-        torch.npu.synchronize()
-        start_time = time.time()
-
     # 提前生成采样索引
     orders = torch.randint(
         0,
         num_samples,
         (steps, micro_batch)
     )
+
+    # 同步一下，保证计时从训练开始
+    torch.npu.synchronize()
+    dist.barrier()
+    if dist.get_rank() == 0:
+        start_time = time.time()
+
 
     for step in range(steps):
 
@@ -147,14 +149,25 @@ def run_training(model_engine, input_ids, labels, steps, log_interval=10):
         model_engine.backward(loss)
         model_engine.step()
 
-        loss_value = loss.item()
+
+        # 用于记录 global average loss
+        loss_record = loss.detach()
+
+        dist.all_reduce(
+            loss_record,
+            op=dist.ReduceOp.AVG
+        )
+
+        loss_value = loss_record.item()
         loss_history.append(loss_value)
 
-        if step % log_interval == 0 and dist.get_rank() == 0:
-            print(f"Step {step:3d} | loss = {loss.item():.6f}", flush=True)
 
+        if step % log_interval == 0 and dist.get_rank() == 0:
+            print(f"Step {step:3d} | loss = {loss_value:.6f}", flush=True)
+
+    torch.npu.synchronize()
+    dist.barrier()
     if dist.get_rank() == 0:
-        torch.npu.synchronize()
         total_time = time.time() - start_time
         print(
             f"total_time={total_time:.3f}s",
