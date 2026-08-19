@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 import time
 import torch
+import torch_npu
 import torch.nn as nn
 import deepspeed
 import deepspeed.comm as dist
@@ -130,7 +131,24 @@ def run_training(model_engine, input_ids, labels, steps, log_interval=10):
     dist.barrier()
     if dist.get_rank() == 0:
         start_time = time.time()
+        prof = torch_npu.profiler.profile(
+            activities=[
+                torch_npu.profiler.ProfilerActivity.CPU,
+                torch_npu.profiler.ProfilerActivity.NPU,
+            ],
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
+                "./prof"
+            ),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+    else:
+        prof = None
 
+        
+    if prof:
+        prof.start()
 
     for step in range(steps):
 
@@ -161,6 +179,12 @@ def run_training(model_engine, input_ids, labels, steps, log_interval=10):
         loss_value = loss_record.item()
         loss_history.append(loss_value)
 
+        if prof:
+            prof.step()
+
+
+        if step == 20 and prof:
+            prof.stop()
 
         if step % log_interval == 0 and dist.get_rank() == 0:
             print(f"Step {step:3d} | loss = {loss_value:.6f}", flush=True)
