@@ -47,7 +47,7 @@ def compute_scale(t: torch.Tensor, kind: str) -> torch.Tensor:
 
     i64_scale = torch_npu.npu_trans_quant_param(ws)
 
-    return scale
+    return i64_scale
 
 
 # @torch._dynamo.allow_in_graph
