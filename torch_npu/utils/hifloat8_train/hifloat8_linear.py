@@ -4,7 +4,6 @@ from torch import nn
 from typing import Callable, Optional
 
 from torch_npu.utils.hifloat8_train.hifloat8_training_tensor import (
-    HiFloat8TrainingTensor,
     hp_tensor_to_hifloat8,
 )
 
@@ -35,29 +34,11 @@ class matmul_with_hifloat8(torch.autograd.Function):
 
         grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])  # [M, N]
 
-        # grad_input = grad_output @ weight = [M, N] @ [N, K]
-        # weight 按输出通道量化（_scale=[N]），把该 scale 吸收到 grad_output 的列，
-        # 复用 weight 的量化数据，x2 的 scale 置为 1。
-        go_input = grad_output_2d * weight_hif8._scale
-        go_input_hif8 = hp_tensor_to_hifloat8(go_input, "grad")
-        weight_q = HiFloat8TrainingTensor(
-            weight_hif8._data,
-            torch.ones(1, device=weight_hif8._data.device, dtype=torch.int64),
-            weight_hif8._orig_dtype,
-        )
-        grad_input = torch.mm(go_input_hif8, weight_q)
+        grad_output_hif8 = hp_tensor_to_hifloat8(grad_output_2d, "grad")
 
-        # grad_weight = grad_output^T @ input = [N, M] @ [M, K]
-        # input 按 token 量化（_scale=[M]），把该 scale 吸收到 grad_output 的行，
-        # 复用 input 的量化数据，x2 的 scale 置为 1。
-        go_weight = grad_output_2d * input_hif8._scale.reshape(-1, 1)
-        go_weight_hif8 = hp_tensor_to_hifloat8(go_weight.t(), "grad")
-        input_q = HiFloat8TrainingTensor(
-            input_hif8._data,
-            torch.ones(1, device=input_hif8._data.device, dtype=torch.int64),
-            input_hif8._orig_dtype,
-        )
-        grad_weight = torch.mm(go_weight_hif8, input_q)
+        # per-tensor 量化，scale 为标量，直接复用 forward 缓存的量化张量
+        grad_input = torch.mm(grad_output_hif8, weight_hif8)      # [M, N] @ [N, K] = [M, K]
+        grad_weight = torch.mm(grad_output_hif8.t(), input_hif8)  # [N, M] @ [M, K] = [N, K]
 
         return grad_input.reshape(ctx.input_shape), grad_weight
 

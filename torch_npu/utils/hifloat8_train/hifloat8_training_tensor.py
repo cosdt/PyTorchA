@@ -31,15 +31,15 @@ def compute_scale(t: torch.Tensor, kind: str) -> torch.Tensor:
 
     if kind == "input":
         # [M,K] -> [M]
-        amax = t.abs().amax(dim=-1)
+        amax = t.abs().amax()
 
     elif kind == "weight":
         # [N,K] -> [N]
-        amax = t.abs().amax(dim=-1)
+        amax = t.abs().amax()
 
     elif kind == "grad":
         # [M,K] -> [M]
-        amax = t.abs().amax(dim=-1)
+        amax = t.abs().amax()
 
     scale = amax.float().clamp_min(1e-12) / max_val
 
@@ -64,19 +64,15 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
 
         scale = compute_scale(input, kind)
 
-        # npu_quantize 的 scale 只支持标量或按最后一维缩放，而 compute_scale
-        # 是沿最后一维求 amax（per-token / per-channel）。因此先交换最后两维，
-        # 让目标维度落到最后一维，量化完成后再交换回来。
-        input_t = input.transpose(-1, -2)
+        # per-tensor 量化，scale 为标量，无需转置
         data = torch_npu.npu_quantize(
-            input_t,
+            input,
             scale,
             zero_points=None,
             dtype=torch_npu.hifloat8,
         )
-        data = data.transpose(-1, -2)
 
-        ws = scale.data.reshape(-1).float()
+        ws = scale.reshape(-1).float()
 
         i64_scale = torch_npu.npu_trans_quant_param(ws)
 
