@@ -7,10 +7,10 @@ from typing import Dict
 
 aten = torch.ops.aten
 
-# MXFP8：数据用 float8_e4m3fn，scale 用 E8M0（8-bit 指数，2 的幂）。
-# scale 是 block-wise 的：沿最后一维（K 维）按 block_size=32 分组共享一个 scale。
-# 量化与 scale 生成统一由 torch_npu.npu_dynamic_mx_quant 完成，
-# 返回的 shared_exponent 即乘性 scale（E8M0）。
+# MXFP8：数据用 float8_e4m3fn，scale 是 block-wise 的 E8M0（8-bit 指数，2 的幂）。
+# scale 沿最后一维（K 维）按 block_size=32 分组共享。
+# npu_dynamic_mx_quant 返回的 shared_exponent 是 uint8，存 E8M0 指数（偏置 127），
+# 值 = 2^(e - 127)，传给 npu_quant_matmul 时用 scale_dtype 声明为 e8m0。
 MXFP8_BLOCK_SIZE = 32
 
 
@@ -37,11 +37,10 @@ class _ToMxFP8ConstrFunc(torch.autograd.Function):
             block_size=MXFP8_BLOCK_SIZE,
         )
 
-        # AMCT 的 MXFP8 路径直接使用返回的 scale，不额外转换，
-        # 因此这里校验其 dtype 确实是 float8_e8m0fnu，避免 dtype 占位差异。
-        assert scale.dtype == torch.float8_e8m0fnu, (
-            f"unexpected MXFP8 scale dtype: {scale.dtype}, "
-            f"expected torch.float8_e8m0fnu"
+        # npu_dynamic_mx_quant 返回的 scale 是 uint8，存 E8M0 指数（偏置 127），
+        # 这里不做转换，直接交给 npu_quant_matmul，由 scale_dtype 声明为 e8m0。
+        assert scale.dtype == torch.uint8, (
+            f"unexpected MXFP8 scale dtype: {scale.dtype}, expected torch.uint8"
         )
 
         return MxFP8TrainingTensor(
@@ -63,9 +62,12 @@ class _FromMxFP8ConstrFunc(torch.autograd.Function):
         ctx,
         input: torch.Tensor,
     ):
-        # 反量化：q * scale，scale 沿最后一维每 MXFP8_BLOCK_SIZE 个元素广播
+        # 反量化：q * scale。scale 是 uint8 存的 E8M0 指数（偏置 127），
+        # 先转成 2^(e-127) 的乘性 scale，再沿最后一维每 MXFP8_BLOCK_SIZE 个元素广播。
         out = input._data.float()
-        scale = input._scale.float().repeat_interleave(MXFP8_BLOCK_SIZE, dim=-1)
+        e = input._scale.float()
+        scale = torch.where(e == 0, torch.zeros_like(e), torch.pow(2.0, e - 127.0))
+        scale = scale.repeat_interleave(MXFP8_BLOCK_SIZE, dim=-1)
         scale = scale[..., : input._data.shape[-1]]
         out = out * scale
         return out.to(input._orig_dtype)
@@ -77,7 +79,7 @@ class _FromMxFP8ConstrFunc(torch.autograd.Function):
 
 class MxFP8TrainingTensor(torch.Tensor):
     _data: torch.Tensor
-    _scale: torch.Tensor    # e8m0 标量
+    _scale: torch.Tensor    # uint8，存 E8M0 指数（偏置 127）
     _orig_dtype: torch.dtype
     __slots__ = ["_data", "_scale", "_orig_dtype"]
 
