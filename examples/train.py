@@ -28,6 +28,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import time
 import torch
 import torch.nn as nn
 import deepspeed
@@ -45,24 +46,39 @@ DS_COMPILE_BACKEND = os.getenv("DS_COMPILE_BACKEND", "npu")
 
 from pathlib import Path
 
-dataset_path = "/home/c30076943/dataset/wikitext-2-raw/wiki.train.raw"
-
-with open(dataset_path, "r", encoding="utf-8") as f:
-    datasets = f.read()
 
 
 def build_dataset(tokenizer, seq_len):
-    encodings = tokenizer(
+
+    dataset_path = "/home/c30076943/dataset/wikitext-2-raw/wiki.train.raw"
+
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        datasets = f.read()
+
+    # 整个文本 tokenize
+    input_ids = tokenizer(
         datasets,
-        padding="max_length",
-        truncation=True,
-        max_length=seq_len,
         return_tensors="pt",
+    )["input_ids"][0]
+
+    # 丢弃不足一个 seq_len 的尾部
+    total_len = (
+        input_ids.numel() // seq_len
+    ) * seq_len
+    input_ids = input_ids[:total_len]
+
+    # [num_samples, seq_len]
+    input_ids = input_ids.view(
+        -1,
+        seq_len
     )
-    input_ids = encodings["input_ids"]
+
+    # causal LM: label就是input本身
     labels = input_ids.clone()
-    # 因果 LM 训练时忽略 padding 位置（置 -100，不参与 loss）
-    labels[input_ids == tokenizer.pad_token_id] = -100
+
+    print("input_ids shape:", input_ids.shape)
+    print("labels shape:", labels.shape)
+
     return input_ids, labels
 
 
@@ -79,29 +95,13 @@ def get_ds_config(world_size, micro_batch_size, gradient_accumulation_steps, lr)
             "params": {"lr": lr},
         },
         "zero_optimization": {
-            "stage": 3,  # 使用 ZeRO-3，切分模型参数
-            "offload_optimizer": {
-                "device": "cpu",  # 优化器状态 offload 到 CPU
-                "pin_memory": True
-            },
-            "offload_param": {
-                "device": "cpu",  # 参数 offload 到 CPU
-                "pin_memory": True
-            },
-            "contiguous_gradients": True,
-            "stage3_max_live_parameters": 1e9,
-            "stage3_max_reuse_distance": 1e9,
-            "stage3_prefetch_bucket_size": 5e8,
-            "stage3_param_persistence_threshold": 1e6,
+            "stage": 2,
+            "contiguous_gradients": True
         },
     }
 
 
 def maybe_compile_module(module: nn.Module) -> nn.Module:
-    """图模式：在 HiFloat8 层替换之后编译模型，失败时回退到 eager。"""
-    if not hasattr(torch, "compile"):
-        print("[COMPILE] torch.compile unavailable, skip.", flush=True)
-        return module
     try:
         compiled_module = torch.compile(module, backend=DS_COMPILE_BACKEND)
         print(f"[COMPILE] torch.compile enabled, backend={DS_COMPILE_BACKEND}.", flush=True)
@@ -116,22 +116,62 @@ def run_training(model_engine, input_ids, labels, steps, log_interval=10):
     num_samples = input_ids.shape[0]
     device = "npu"
 
+    loss_history = []
+
+    # 同步一下，保证计时从训练开始
+    if dist.get_rank() == 0:
+        torch.npu.synchronize()
+        start_time = time.time()
+
+    # 提前生成采样索引
+    orders = torch.randint(
+        0,
+        num_samples,
+        (steps, micro_batch)
+    )
+
     for step in range(steps):
-        # 每个 rank 用自己的随机顺序取 micro-batch，模拟真实数据并行
-        order = torch.randperm(num_samples)[:micro_batch]
+
+        order = orders[step]
+
         batch_ids = input_ids[order].to(device)
         batch_labels = labels[order].to(device)
 
         model_engine.zero_grad()
-        out = model_engine(input_ids=batch_ids, labels=batch_labels)
+        out = model_engine(
+            input_ids=batch_ids, 
+            labels=batch_labels
+        )
         loss = out.loss
+
         model_engine.backward(loss)
         model_engine.step()
 
-        # if step % log_interval == 0 and dist.get_rank() == 0:
-        if dist.get_rank() == 0:
+        loss_value = loss.item()
+        loss_history.append(loss_value)
+
+        if step % log_interval == 0 and dist.get_rank() == 0:
             print(f"Step {step:3d} | loss = {loss.item():.6f}", flush=True)
 
+    if dist.get_rank() == 0:
+        torch.npu.synchronize()
+        total_time = time.time() - start_time
+        print(
+            f"total_time={total_time:.3f}s",
+            flush=True
+        )
+        print(
+            f"avg_step_time={total_time/steps:.6f}s",
+            flush=True
+        )
+        # 保存loss曲线
+        with open("loss.csv", "w") as f:
+
+            f.write("step,loss\n")
+            for i, loss in enumerate(loss_history):
+                f.write(
+                    f"{i},{loss}\n"
+                )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="HiFloat8 + DeepSpeed training modes")
@@ -165,8 +205,8 @@ def parse_args():
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=128,
-        help="训练序列长度（默认 128）",
+        default=2048,
+        help="训练序列长度（默认 2048）",
     )
     parser.add_argument(
         "--gradient-accumulation-steps",
