@@ -84,7 +84,7 @@ class _ToHiFloat8ConstrFunc(torch.autograd.Function):
         # Construct HIF8 tensor
         return HiFloat8TrainingTensor(
             data=data,
-            scale=scale,
+            scale=i64_scale,
             orig_dtype=input.dtype,
         )
 
